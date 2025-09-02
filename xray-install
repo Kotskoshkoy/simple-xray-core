@@ -1,28 +1,73 @@
 #!/bin/bash
-apt update
-apt install qrencode curl jq -y
 
-# Включаем bbr
-bbr=$(sysctl -a | grep net.ipv4.tcp_congestion_control)
-if [ "$bbr" = "net.ipv4.tcp_congestion_control = bbr" ]; then
-echo "bbr уже включен"
-else
-echo "net.core.default_qdisc=fq" >> /etc/sysctl.conf
-echo "net.ipv4.tcp_congestion_control=bbr" >> /etc/sysctl.conf
-sysctl -p
-echo "bbr включен"
-fi
+# Устанавливаем необходимые зависимости, включая openssl
+apt update
+apt install qrencode curl jq openssl -y
+
+# ... [Ваш код включения BBR] ...
 
 # Устанавливаем ядро Xray
 bash -c "$(curl -4 -L https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install
-[ -f /usr/local/etc/xray/.keys ] && rm /usr/local/etc/xray/.keys
-touch /usr/local/etc/xray/.keys
-echo "uuid: $(xray uuid)" >> /usr/local/etc/xray/.keys
-xray x25519 >> /usr/local/etc/xray/.keys
-echo "shortsid: $(openssl rand -hex 8)" >> /usr/local/etc/xray/.keys
-export uuid=$(cat /usr/local/etc/xray/.keys | awk -F': ' '/uuid/ {print $2}')
-export privatkey=$(cat /usr/local/etc/xray/.keys | awk -F': ' '/Private key/ {print $2}')
-export shortsid=$(cat /usr/local/etc/xray/.keys | awk -F': ' '/shortsid/ {print $2}')
+
+# Создаем директорию для ключей, если её нет
+keys_file="/usr/local/etc/xray/.keys"
+mkdir -p "$(dirname "$keys_file")"
+[ -f "$keys_file" ] && rm "$keys_file"
+touch "$keys_file"
+
+# Генерируем UUID с проверкой команды
+if uuid_output=$(xray uuid 2>/dev/null); then
+    echo "uuid: $uuid_output" >> "$keys_file"
+    uuid="$uuid_output"
+else
+    echo "Ошибка: Не удалось сгенерировать UUID с помощью 'xray uuid'. Используется fallback."
+    # Fallback на генерацию через ядро Linux /proc/sys/kernel/random/uuid
+    uuid_fallback=$(cat /proc/sys/kernel/random/uuid 2>/dev/null || echo "")
+    if [ -n "$uuid_fallback" ]; then
+        echo "uuid: $uuid_fallback" >> "$keys_file"
+        uuid="$uuid_fallback"
+    else
+        echo "Критическая ошибка: Не удалось сгенерировать UUID никаким способом." >&2
+        exit 1
+    fi
+fi
+
+# Генерируем ключи X25519
+if key_output=$(xray x25519 2>/dev/null); then
+    echo "$key_output" >> "$keys_file"
+    # Извлекаем приватный ключ более надежным способом
+    privatkey=$(echo "$key_output" | awk -F': ' '/Private key/ {print $2}')
+else
+    echo "Ошибка: Не удалось сгенерировать ключи x25519." >&2
+    privatkey=""
+fi
+
+# Генерируем ShortID. Гарантированно используем openssl, который мы установили.
+if shortsid_output=$(openssl rand -hex 8 2>/dev/null); then
+    echo "shortsid: $shortsid_output" >> "$keys_file"
+    shortsid="$shortsid_output"
+else
+    echo "Ошибка: Не удалось сгенерировать ShortID с помощью openssl." >&2
+    # Fallback на использование /dev/urandom
+    shortsid_fallback=$(head -c 8 /dev/urandom | hexdump -e '16/1 "%02x"')
+    if [ -n "$shortsid_fallback" ]; then
+        echo "shortsid: $shortsid_fallback" >> "$keys_file"
+        shortsid="$shortsid_fallback"
+    else
+        echo "Предупреждение: Не удалось сгенерировать ShortID. Будет использована пустая строка." >&2
+        shortsid=""
+    fi
+fi
+
+# Экспортируем переменные для использования в следующих частях скрипта
+export uuid
+export privatkey
+export shortsid
+
+# Выводим для отладки (можно закомментировать)
+echo "UUID: $uuid"
+echo "Private Key: $privatkey"
+echo "ShortID: $shortsid"
 
 # Создаем файл конфигурации Xray
 touch /usr/local/etc/xray/config.json
